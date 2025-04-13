@@ -33,6 +33,22 @@ pip install -r requirements.txt
 ```sh
 alembic upgrade head
 ```
+6. Аутентифицироваться по адресу `/api/auth/register/`
+```json
+{
+    "email": "<email>",
+    "password": "<password>"
+}
+```
+7. Получить токен аутентификации по адресу `/api/auth/jwt/login/`
+```json
+{
+    "username": "<email>",
+    "password": "<password>"
+}
+```
+### При дальнейших запросах указывать токен в заголовках (Bearer)
+
 ## При запуске приложения будут автоматически созданы:
 1. Пользователь с правами `user`
 2. Аккаунт пользователя
