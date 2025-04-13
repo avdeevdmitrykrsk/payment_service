@@ -121,7 +121,7 @@ class PaymentService:
 
         logger.info('Начат процесс транзакции')
 
-        # await self.verify_signature(payment_dict)
+        await self.verify_signature(payment_dict)
         logger.info('Подпись успешно проверена')
 
         logger.info('Созданине записи о платеже')
