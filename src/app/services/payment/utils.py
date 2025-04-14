@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 class PaymentService:
 
+    postgres_lock_timeout: float = 1.0
+
     def __init__(self, secret_key: str):
         self.secret_key = secret_key
 
@@ -48,6 +50,7 @@ class PaymentService:
         """Метод проверяет подпись."""
         logger.info('Проверка подписи платежа')
         expected_sign = await self._generate_signature(data)
+
         if not hmac.compare_digest(expected_sign, data['signature']):
             logger.warning('Подпись невалидна')
             raise HTTPException(status.HTTP_403_FORBIDDEN, 'Invalid signature')
@@ -88,15 +91,49 @@ class PaymentService:
         self, session: AsyncSession, account: Account, amount: Decimal
     ):
         """Метод обновляет баланс счета."""
-        locked_account = await session.execute(
-            select(Account)
-            .where(Account.id == account.id)
-            .with_for_update()
-            .execution_options(postgresql_lock_timeout=1.0)
-        )
-        locked_account = locked_account.scalars().one()
+        try:
+            locked_account = await session.execute(
+                select(Account)
+                .where(Account.id == account.id)
+                .with_for_update(of=Account)
+                .execution_options(
+                    postgresql_lock_timeout=self.postgres_lock_timeout
+                )
+            )
+            locked_account = locked_account.scalars().one()
 
-        locked_account.balance += amount
+            locked_account.balance += amount
+
+        except OperationalError as e:
+            await session.rollback()
+            if 'lock timeout' in str(e).lower():
+                logger.error(
+                    'Ошибка обновления баланса аккаунта '
+                    f'Account_id: {account.id} '
+                    '-- аккаунт временно заблокирован'
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        'message': 'Account locked',
+                        'retry_after': self.postgres_lock_timeout,
+                        'account_id': account.id,
+                    },
+                )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                'Database operation failed',
+            )
+
+        except Exception as e:
+            await session.rollback()
+            logger.critical(
+                f'Unexpected error updating account {account.id}: {str(e)}',
+                exc_info=True,
+            )
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, 'Internal server error'
+            )
 
     def _build_response(
         self, account: Account, transaction: Payment
@@ -133,24 +170,14 @@ class PaymentService:
         )
         logger.info('Запись о платеже успешно создана')
 
-        try:
-            logger.info('Обновление баланса аккаунта')
-            await self.update_account_balance(
-                session=session,
-                account=account,
-                amount=transaction.payment_amount,
-            )
-            await session.commit()
-            logger.info('Баланс успешно обновлен')
-
-        except OperationalError as e:
-            if 'lock timeout' in str(e).lower():
-                logger.error('Ошибка обновления lock-timeout')
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail='System busy. Please retry in a moment'
-                )
-            raise
+        logger.info('Обновление баланса аккаунта')
+        await self.update_account_balance(
+            session=session,
+            account=account,
+            amount=transaction.payment_amount,
+        )
+        await session.commit()
+        logger.info('Баланс успешно обновлен')
 
         logger.info('Генерация ответа')
         return self._build_response(account=account, transaction=transaction)
